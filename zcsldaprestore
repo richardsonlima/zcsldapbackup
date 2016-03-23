@@ -1,0 +1,219 @@
+#!/bin/bash
+# zcsldaprestore.sh
+# This script running zimbraldap on a ZCS server. It also makes sure
+# the script's dependencies are present.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# zcsldaprestore provides
+#
+#    Restore of ldap (ldif file) all accounts; (Specify Domain) 
+#    Restore of ldap (ldif file) any account; (Specify Domain) 
+#
+### History: Based on Zmbkpose created By Rubens Alonso Filho <rubens@harv.com.br> <rubens@4linux.com.br>
+### Rewritten and applied only for zimbra ldap backup by Richardson Lima <richardsonlimasurfjiujitsu@gmail.com>
+#
+
+show_help ()
+{
+echo "Usage: 
+
+     zcsldaprestore --ldap 	
+			Execute full restore ldif file, all accounts.
+     zcsldaprestore --ldap mail1,mail2,...,mailn
+			Execute restore ldif file for specific accounts.
+     zcsldaprestore --restoreDistributionList
+			Restore all distribution lists from last backup.
+     zcsldaprestore --restoreAlias
+			Restore all alias from last backup.
+"
+exit 0 
+}
+###### MAIN ############
+#Specify Domain for backup all accounts.
+DOMAIN='dc=domain,dc=com,dc=br'
+
+# Here the code loads the config file
+source /etc/zcsldapbackup/zimbrabackup.conf
+
+#
+if ! [ -z "$BACKUPUSER" ]; then
+	if [ "$(id -u)" != "$(id -u $BACKUPUSER)" ]; then
+		echo "You need to be $BACKUPUSER to run this script"
+		exit 0
+	fi
+else
+	echo "You need to define the variable BACKUPUSER"
+	exit 0
+fi
+
+if ! [ -z "$WORKDIR" ]; then
+        if ! [ -d "$WORKDIR" ]; then
+                echo "The directory $WORKDIR doesn't exist"
+                exit 0
+        fi
+else
+        echo "You need to define the variable WORKDIR"
+        exit 0
+fi
+
+if [ -z "$ADMINUSER" ]; then
+        echo "You need to define the variable ADMINUSER"
+        exit 0
+fi
+
+if [ -z "$ADMINPASS" ]; then
+        echo "You need to define the variable ADMINPASS"
+        exit 0
+fi
+
+if [ -z "$LDAPMASTERSERVER" ]; then
+        echo "You need to define the variable LDAPMASTERSERVER"
+        exit 0
+fi
+
+if [ -z "$LDAPZIMBRADN" ]; then
+        echo "You need to define the variable LDAPZIMBRADN"
+        exit 0
+fi
+
+if [ -z "$LDAPZIMBRAPASS" ]; then
+        echo "You need to define the variable LDAPZIMBRAPASS"
+        exit 0
+fi
+
+if [ -z "$LOGFILE" ]; then
+        echo "You need to define the variable LOGFILE"
+        exit 0
+fi
+
+# Function to notify completes backup trough e-mail
+notify_email()
+{
+	
+	TIPO=$1;
+	session=$2;
+	du -h $WORKDIR/$session/* > /tmp/list-$session ;
+	total=$(du -h $WORKDIR/$session | awk {'print $1'});
+	(echo "Subject: Backup $TIPO completed on $(date)";echo "Backup $TIPO completed on $(date)";echo -e "\r\nTotal: $total ";echo "Summary of files:"; cat /tmp/list-$session) | /opt/zimbra/postfix/sbin/sendmail $EMAIL_NOTIFY
+}
+
+restore_LDAP_account ()
+{
+	BKPSACCOUNT=$(mktemp)
+	K=1
+
+	while true; do
+	
+	        MAIL=$(echo $1, | cut -d, -f$K)
+	        if [ -z $MAIL ]; then
+	                break
+	        fi
+
+	        if [ -z $2 ]; then
+
+	                EXISTE=$($(which ldapsearch) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -w $LDAPZIMBRAPASS -b $DOMAIN -LLL "(&(objectclass=zimbraAccount)(zimbraMailDeliveryAddress=$MAIL))" uid)
+	                if ! [ -z "$EXISTE" ]; then
+	                        echo "Account $MAIL exists. Use zcsldaprestore -r $MAIL SESSION_name."
+	                        ((K = K+1))
+	                else
+	                        grep $MAIL $WORKDIR/sessions.txt | grep -e ^inc- -e ^full- > $BKPSACCOUNT
+	                        if ! [ -s $BKPSACCOUNT ]; then
+	                                echo "$MAIL: No backup found. Impossible to restore."
+	                                ((K = K+1))
+	                        else
+	                                echo "Sessions found $(cat $BKPSACCOUNT | awk -F: '{print $1}')"
+	                                for SESSIONACCOUNT in $(cat $BKPSACCOUNT | awk -F: '{print $1}'); do
+	                                        echo "Restoring from $SESSIONACCOUNT"
+                                        	MAILHOST=$(grep ^zimbraMailHost $WORKDIR/$SESSIONACCOUNT/$MAIL.ldiff | awk '{print $2}')
+                                        	$(which ldapdelete) -r -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -c -w $LDAPZIMBRAPASS $(grep ^dn: $WORKDIR/$SESSIONACCOUNT/$MAIL.ldiff | awk '{print $2}') 2>/dev/null
+                                        	$(which ldapadd) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -c -w $LDAPZIMBRAPASS -f $WORKDIR/$SESSIONACCOUNT/$MAIL.ldiff
+
+                                        	echo "$MAIL restored from  $SESSIONACCOUNT"
+                                	done
+                                	((K = K+1))
+                                	unset MAIL
+                        	fi
+                	fi
+        	else
+                	SESSIONACCOUNT=$(grep $2 $WORKDIR/sessions.txt | grep $MAIL | tail -1 | awk -F: '{print $1}')
+                	if [ -z $SESSIONACCOUNT ]; then
+                	        echo "$MAIL: Session $2 doesn't exist or account not present. Impossible to restore."
+                	        ((K = K+1))
+                	else
+                        	USERDN=$(grep ^dn: $WORKDIR/$SESSIONACCOUNT/$MAIL.ldiff | awk '{print $2}')
+                        	$(which ldapdelete) -r -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -c -w $LDAPZIMBRAPASS $USERDN
+                        	$(which ldapadd) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -c -w $LDAPZIMBRAPASS -f $WORKDIR/$SESSIONACCOUNT/$MAIL.ldiff
+                        	echo "User's profile and configurations restored to $SESSIONACCOUNT"
+                        	((K = K+1))
+                        	unset MAIL
+                	fi
+        	fi
+	done
+	exit 0
+}
+restore_alias()
+{
+	for BKP in $(grep -e "^alias-"  $WORKDIR/sessions.txt); do
+		SESSAOCONTA=$(echo $BKP | awk -F: '{print $1}')
+		MAIL=$(echo $BKP | awk -F: '{print $2}')
+		$(which ldapadd) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -c -w $LDAPZIMBRAPASS -f $WORKDIR/$SESSAOCONTA/$MAIL.ldiff	
+	done
+}
+
+
+restore_distribution_list()
+{
+        for BKP in $(grep -e "^distlist-"  $WORKDIR/sessions.txt); do
+                SESSAOCONTA=$(echo $BKP | awk -F: '{print $1}')
+                MAIL=$(echo $BKP | awk -F: '{print $2}')
+                $(which ldapadd) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -c -w $LDAPZIMBRAPASS -f $WORKDIR/$SESSAOCONTA/$MAIL.ldiff
+        done
+}
+case "$1" in
+"--ldap" )
+		if [ -z "$3" ]; then
+			restore_LDAP_account $2
+		else
+			if [ "$3" = "--LDAPOnly" ]; then
+				restore_LDAP_account $2 $4
+			else
+	                	echo "Incorrect $@ params. Read the --help."
+		                show_help
+			fi
+		fi
+;;
+"--restoreAlias" )
+	restore_alias
+;;
+"--restoreDistributionList" )
+	restore_distribution_list
+;;
+
+* )
+	echo "Incorrect parameters $@. See help."
+	show_help
+;;
+esac
+exit 0
+###################################################################
+#!/bin/bash
+#all_ldiffiles=`/backup/ldifdomain/`;
+#
+#cd $all_ldiffiles
+#for account in *.ldiff
+#do
+#/opt/zimbra/openldap/sbin/slapadd -q -b "" -F  /opt/zimbra/data/ldap/config -cv -l $account
+#echo "Restore account $account wait for a few minutes"
+#done
