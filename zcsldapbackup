@@ -1,0 +1,207 @@
+#!/bin/bash
+# zcsldapbackup.sh
+# This script running zimbraldap on a ZCS server. It also makes sure
+# the script's dependencies are present.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# zcsldapbackup provides
+#
+#    Full backup of ldap (ldif file) all accounts; (Specify Domain) 
+#    Full backup of ldap (ldif file) any account; (Specify Domain)
+#
+### History: Based on Zmbkpose created By Rubens Alonso Filho <rubens@harv.com.br> <rubens@4linux.com.br>
+### Rewritten and applied only for zimbra ldap backup by Richardson Lima <richardsonlimasurfjiujitsu@gmail.com>
+#
+
+show_help ()
+{
+echo "Usage: 
+
+     zcsldapbackup --ldap 	
+			Execute full backup ldif file, all accounts.
+     zcsldapbackup --ldap mail1,mail2,...,mailn
+			Execute backup ldif file for specific accounts.
+     zcsldapbackup --backupDistributionList
+			Make full backup of Distribution  Lists.
+     zcsldapbackup --backupAlias
+			Make full backup of Alias.
+			
+"
+exit 0 
+}
+###### MAIN ############
+#Specify Domain for backup all accounts.
+DOMAIN='dc=domain,dc=com,dc=br'
+
+# Here the code loads the config file
+source /etc/zcsldapbackup/zimbrabackup.conf
+
+#
+if ! [ -z "$BACKUPUSER" ]; then
+	if [ "$(id -u)" != "$(id -u $BACKUPUSER)" ]; then
+		echo "You need to be $BACKUPUSER to run this script"
+		exit 0
+	fi
+else
+	echo "You need to define the variable BACKUPUSER"
+	exit 0
+fi
+
+if ! [ -z "$WORKDIR" ]; then
+        if ! [ -d "$WORKDIR" ]; then
+                echo "The directory $WORKDIR doesn't exist"
+                exit 0
+        fi
+else
+        echo "You need to define the variable WORKDIR"
+        exit 0
+fi
+
+if [ -z "$ADMINUSER" ]; then
+        echo "You need to define the variable ADMINUSER"
+        exit 0
+fi
+
+if [ -z "$ADMINPASS" ]; then
+        echo "You need to define the variable ADMINPASS"
+        exit 0
+fi
+
+if [ -z "$LDAPMASTERSERVER" ]; then
+        echo "You need to define the variable LDAPMASTERSERVER"
+        exit 0
+fi
+
+if [ -z "$LDAPZIMBRADN" ]; then
+        echo "You need to define the variable LDAPZIMBRADN"
+        exit 0
+fi
+
+if [ -z "$LDAPZIMBRAPASS" ]; then
+        echo "You need to define the variable LDAPZIMBRAPASS"
+        exit 0
+fi
+
+if [ -z "$LOGFILE" ]; then
+        echo "You need to define the variable LOGFILE"
+        exit 0
+fi
+
+# Function to notify completes backup trough e-mail
+notify_email()
+{
+	
+	TIPO=$1;
+	session=$2;
+	du -h $WORKDIR/$session/* > /tmp/list-$session ;
+	total=$(du -h $WORKDIR/$session | awk {'print $1'});
+	(echo "Subject: Backup $TIPO completed on $(date)";echo "Backup $TIPO completed on $(date)";echo -e "\r\nTotal: $total ";echo "Summary of files:"; cat /tmp/list-$session) | /opt/zimbra/postfix/sbin/sendmail $EMAIL_NOTIFY
+}
+#Make full backup ldap config of all accounts per domain, sequential.
+backup_all_accounts_ldap_per_domain ()
+{
+	LISTALLACCOUNTS=$(mktemp)
+	$(which ldapsearch) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -w $LDAPZIMBRAPASS -b $DOMAIN -LLL "(objectclass=zimbraAccount)" zimbraMailDeliveryAddress zimbraMailHost | grep ^zimbraMail | awk '{print $2}' > "$LISTALLACCOUNTS"
+	SESSION="full-"$(date  +%Y%m%d%H%M%S)
+	echo "SESSION: $SESSION started on $(date)" >> $WORKDIR/sessions.txt
+	TEMPDIR=$(mktemp -d $WORKDIR/XXXX)
+for MAIL in $(grep @ $LISTALLACCOUNTS); do
+       	MAILHOST=$(grep -A1 ^$MAIL $LISTALLACCOUNTS| grep -v @)
+        $(which ldapsearch) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -w $LDAPZIMBRAPASS -b $DOMAIN -LLL "(zimbraMailDeliveryAddress=$MAIL)" > $TEMPDIR/$MAIL.ldiff
+echo $SESSION:$MAIL:$(date +%m/%d/%y) >> $WORKDIR/sessions.txt
+	done
+
+	mv "$TEMPDIR" "$WORKDIR/$SESSION" && rm -rf "$TEMPDIR"
+	echo "SESSION: $SESSION completed in $(date)" >> $WORKDIR/sessions.txt
+	notify_email "FULL" $SESSION 
+
+	exit 0
+}
+
+backup_alias()
+{
+COUNT=0
+LISTATODASCONTAS=$(mktemp)
+$(which ldapsearch) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -w $LDAPZIMBRAPASS -b $DOMAIN -LLL "(objectclass=zimbraAlias)" uid | grep ^uid | awk '{print $2}' > "$LISTATODASCONTAS"
+SESSAO="alias-"$(date  +%Y%m%d%H%M%S)
+echo "SESSAO: $SESSAO iniciada em $(date)" >> $WORKDIR/sessions.txt
+TEMPDIR=$(mktemp -d $WORKDIR/XXXX)
+for MAIL in $(cat $LISTATODASCONTAS); do
+        $(which ldapsearch) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -w $LDAPZIMBRAPASS -b $DOMAIN -LLL "(&(uid=$MAIL)(objectclass=zimbraAlias))" > $TEMPDIR/$MAIL.ldiff
+	echo $SESSAO:$MAIL:$(date +%m/%d/%y) >> $WORKDIR/sessions.txt
+        let COUNT++
+done
+mv "$TEMPDIR" "$WORKDIR/$SESSAO" && rm -rf "$TEMPDIR"
+echo "SESSAO: $SESSAO concluída em $(date)" >> $WORKDIR/sessions.txt
+
+echo "$(date) - Efetuados backup de $COUNT conta(s)" >> $LOGFILE
+
+exit 0
+
+}
+
+backup_distribution_list()
+{
+	COUNT=0
+	LISTATODASCONTAS=$(mktemp)
+	$(which ldapsearch) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -w $LDAPZIMBRAPASS -b $DOMAIN -LLL "(objectclass=zimbraDistributionList)" mail | grep ^mail | awk '{print $2}' > "$LISTATODASCONTAS"
+	SESSAO="distlist-"$(date  +%Y%m%d%H%M%S)
+	echo "SESSAO: $SESSAO started on $(date)" >> $WORKDIR/sessions.txt
+	TEMPDIR=$(mktemp -d $WORKDIR/XXXX)
+	
+	for MAIL in $(grep @ $LISTATODASCONTAS); do
+        	$(which ldapsearch) -x -H $LDAPMASTERSERVER -D $LDAPZIMBRADN -w $LDAPZIMBRAPASS -b $DOMAIN -LLL "(&(mail=$MAIL)(objectclass=zimbraDistributionList))" > $TEMPDIR/$MAIL.ldiff
+		echo $SESSAO:$MAIL:$(date +%m/%d/%y) >> $WORKDIR/sessions.txt
+        	let COUNT++
+	done
+	
+	mv "$TEMPDIR" "$WORKDIR/$SESSAO" && rm -rf "$TEMPDIR"
+	echo "SESSAO: $SESSAO concluída em $(date)" >> $WORKDIR/sessions.txt
+	echo "$(date) - Backup completed for $COUNT lists" >> $LOGFILE
+	exit 0
+}
+
+#
+case "$1" in
+"--ldap" )
+	if [ -z "$2" ]; then
+		if [ $SEQUENTIAL_SUPPORT -eq 1  ];then
+			echo "Running the sequential backup of ldap config per domain"
+			backup_all_accounts_ldap_per_domain
+		else
+			backup_all_accounts_ldap_per_domain
+		fi
+	else
+		if [ -z "$3" ]; then
+			backup_all_accounts_ldap_per_domain $2
+		else
+			echo "Incorrect $@ params. Read --help."
+			show_help
+		fi
+	fi
+
+;;
+"--backupDistributionList" )
+        backup_distribution_list
+;;
+"--backupAlias" )
+        backup_alias
+;;	
+* )
+	echo "Incorrect parameters $@. See help."
+	show_help
+;;
+esac
+exit 0
